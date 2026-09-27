@@ -1,0 +1,40 @@
+%load('../data/wave_clean.mat'); % clean waveform
+%load('../data/wave_noisy.mat');  % trying with noisy signal 5dB
+%load('../data/wave_cfo.mat');  % clean signal but with cfo 
+load('../data/wave_3pkt.mat');  % clean signal, no cfo, 3 packets
+
+addpath('../sync');
+
+N  = length(rx);
+s  = zeros(N,1);
+a  = false(N,1);
+pe = zeros(N,1);
+pk = zeros(N,1);
+
+sync_step(0, true);
+
+for k = 1:N
+    [s(k), a(k), pe(k), pk(k)] = sync_step(rx(k), false);
+
+end
+
+find(pe)
+preamble_end
+max(s)
+find(a, 1)
+max(pk(2200:2400))
+
+
+
+
+% ------------- 1 packet plot
+% figure
+% subplot(2,1,1)
+% plot(s); grid on; ylim([0 1.2]); xlim([1800 2600])
+% xline(pkt_start,'r'); yline(0.4,'m--')
+% title('STF score'); ylabel('|P|^2/R^2')
+% 
+% subplot(2,1,2)
+% plot(pk); grid on; ylim([0 1.2]); xlim([1800 2600])
+% xline(preamble_end,'g'); yline(0.7,'m--')
+% title('LTF peak'); ylabel('normalised'); xlabel('sample')

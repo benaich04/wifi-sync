@@ -1,0 +1,157 @@
+function [score, armed, preamble_end] = sync_step(sample, reset)
+% STF packet detector. One sample in, one decision out.
+%
+% Compares each sample to the one 16 back. The STF repeats every 16
+% samples, so it matches itself. Noise doesn't.
+%
+%   sample        one complex sample
+%   reset         true to clear state before a new run
+%   score         0 to 1, how well the signal repeats (for plotting)
+%   armed         true the moment a packet is detected
+%   preamble_end  0 normally; sample number when a packet is confirmed
+%
+% No toolbox. Written to map onto hardware:
+%   persistent -> registers, dline -> shift register, loop body -> one clock.
+
+
+
+
+persistent dline hold lbuf state ltf Eref firstPk timer n
+% ---- constants ----
+D    = 16;    % STF repeats every 16 samples. Fixed by the standard.
+L    = 48;    % how many pairs to average. Tunable.
+BETA = 0.6;   % pass mark. Tunable -> becomes an FPGA register.
+NH   = 8;     % how many passes in a row before we believe it. Tunable.
+TH   = 0.7;
+IDLE  = 0;
+ARMED = 1;
+NLTS = 64;
+TMAX = 400;   % give up after this many samples hunting for the LTF
+
+
+
+
+
+% ---- reset, or first ever call ----
+if reset || isempty(dline)
+    dline = zeros(D+L, 1);   % 64 deep: 48 window + 16 lag
+    hold  = 0;
+    score = 0;
+    armed = false;
+    preamble_end = 0;
+    state = IDLE;
+    lbuf = zeros(D+L, 1);   % 64 deep for ARMED state
+    ltf = ltf_ref();        % load the LTF ref suquence
+    Eref = sum(real(ltf).^2 + imag(ltf).^2);
+    firstPk = 0;
+    timer = 0;
+    n = 0;                  % the current sample id
+return
+end
+
+
+
+
+% ---- defaults, every sample ----
+score = 0;
+armed = false;
+preamble_end = 0;
+
+
+
+% ---- shift the new sample in, oldest falls off ----
+dline = [sample; dline(1:end-1)];
+lbuf  = [sample; lbuf(1:end-1)];
+n = n+1;         % holds the id of the current sample
+
+
+
+
+
+
+
+if state == IDLE       % IDLE state
+        % ---- P: how well the signal matches itself 16 back ----
+        % Sum of 48 pairs. Each pair is one sample times the conjugate of the
+        % sample 16 before it. Conjugate-multiply subtracts the phases, so if
+        % the signal truly repeats, every term comes out pointing the same way
+        % and they stack up. Noise terms point randomly and cancel.
+            P = 0;
+            for k = 0:L-1
+                    a = dline(1+k);       % newer sample
+                    b = dline(1+k+D);     % its partner, 16 back
+                    P = P + a * conj(b);
+            end
+            
+            % ---- R: energy of those same 48 older samples ----
+            % This is the yardstick. Without it, a loud signal always beats a quiet
+            % one and no single threshold works at both ranges.
+            % real^2+imag^2 is |x|^2 written out - avoids a square root.
+                R = 0;
+            for k = 0:L-1
+                    b = dline(1+k+D);
+                    R = R + real(b)^2 + imag(b)^2;
+            end
+            
+            
+            % ---- the score ----
+            % |P|^2 / R^2. Perfect repeat -> 1. Noise -> near 0.
+                Pmag2 = real(P)^2 + imag(P)^2;
+                score = Pmag2 / (R^2 + eps);          % eps stops divide-by-zero at startup
+            
+        
+            % ---- decide ----
+            % Note: the real test is a MULTIPLY, not a divide. Same comparison,
+            % no divider in hardware. 'score' above exists only for plotting.
+            if Pmag2 > BETA * R^2
+                    hold = hold + 1;          % another pass - extend the streak
+            if hold >= NH
+                        armed = true;         % NH in a row: a packet is here
+                        state = ARMED;        % switch modes for the next sample
+                        timer = 0;
+            end
+            else
+                    hold = 0;                 % one fail breaks the streak
+            end
+        
+        
+        
+        else          % ARMED state
+        % ---- give up if the LTF never shows ----
+        if timer > TMAX
+                state   = IDLE;
+                firstPk = 0;
+                hold    = 0;
+                timer   = 0;
+        else
+            c = 0;   % correlation value
+            for k = 1:NLTS
+                    a = lbuf(k);       % newer sample
+                    b = ltf(k);        % known LTF sequence
+                    c = c + a * conj(b);
+            end
+                E = sum(real(lbuf).^2 + imag(lbuf).^2);  % Energy in the current LBUF buffer
+                Pk = abs(c)^2 / (E * Eref + eps);        % compute the Peak value (normalized)
+                timer = timer + 1;
+        
+        
+            if (n - firstPk < 32) && (firstPk ~= 0)
+                % ignore - still inside the lockout after the first peak
+            else
+                if Pk < TH
+                    % nothing - keep hunting
+                elseif firstPk == 0
+                                firstPk = n;              % first peak - remember where
+                    else
+                    if n - firstPk == NLTS    % second peak, exactly 64 later
+                                    preamble_end = n;     % confirmed - payload starts next sample
+                                    state   = IDLE;
+                                    firstPk = 0;
+                                    hold    = 0;          % or the next sample re-arms instantly
+                                    timer   = 0;
+                    end
+                end
+            end
+        end
+    end
+end
